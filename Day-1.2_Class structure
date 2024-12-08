@@ -1,0 +1,279 @@
+## 2.1 Class Implementation
+
+### 2.1.1 Instance Variables
+
+#### Implementation Details
+1. Memory Layout Structure:
+```objc
+// Class with explicit ivar layout
+@interface MyClass : NSObject {
+    // 8-byte alignment block
+    double _double;        // 8 bytes
+    
+    // 4-byte alignment block
+    int _int1;            // 4 bytes
+    int _int2;            // 4 bytes
+    
+    // 1-byte alignment block with padding
+    BOOL _bool1;          // 1 byte
+    BOOL _bool2;          // 1 byte
+    char _padding[2];     // 2 bytes padding
+}
+@end
+```
+
+2. Runtime Access:
+```c
+// Internal runtime representation
+typedef struct ivar_t {
+    int32_t *offset;      // Pointer to ivar offset
+    const char *name;     // Ivar name
+    const char *type;     // Encoded type string
+    uint32_t alignment;   // Alignment in bytes
+    uint32_t size;        // Size in bytes
+}
+
+// Runtime ivar manipulation
+Ivar ivar = class_getInstanceVariable([MyClass class], "_myIvar");
+ptrdiff_t offset = ivar_getOffset(ivar);
+id value = object_getIvar(obj, ivar);
+```
+
+#### Performance Considerations
+1. Memory Access Patterns:
+```objc
+@implementation MyClass {
+    // Hot ivars (frequently accessed)
+    int _hotData;         // Place first for cache line optimization
+    
+    // Cold ivars (rarely accessed)
+    NSString *_coldData;  // Place last to avoid cache pollution
+}
+
+- (void)performHotPath {
+    // Direct ivar access for performance
+    _hotData++;  // Fast path
+    
+    if (rare_condition) {
+        self.coldData = @"rare";  // Slow path, ok for cold data
+    }
+}
+@end
+```
+
+2. Cache Line Optimization:
+```objc
+// Group related ivars together
+@interface DataContainer : NSObject {
+    // Group 1: Frequently accessed together
+    CGFloat _x;
+    CGFloat _y;
+    CGFloat _z;
+    
+    // Group 2: Another related set
+    NSString *_firstName;
+    NSString *_lastName;
+    NSString *_middleName;
+}
+@end
+```
+
+### 2.1.2 Property Implementation
+
+#### Implementation Details
+1. Property Attributes:
+```objc
+@interface PropertyExample : NSObject
+
+// Complex property with multiple attributes
+@property (nonatomic,    // No synchronization
+          strong,        // ARC ownership
+          readonly,      // No setter
+          getter=isReady // Custom getter name
+          ) BOOL ready;  
+
+// Backing ivar and methods
+@implementation PropertyExample {
+    BOOL _ready;  // Synthesized ivar
+}
+
+- (BOOL)isReady {
+    return _ready;
+}
+
+@end
+```
+
+2. Custom Accessor Implementation:
+```objc
+@implementation CustomAccessors
+
+// Manual property implementation
+@synthesize title = _title;
+
+- (NSString *)title {
+    @synchronized(self) {
+        return [_title copy];
+    }
+}
+
+- (void)setTitle:(NSString *)title {
+    @synchronized(self) {
+        if (![_title isEqualToString:title]) {
+            [self willChangeValueForKey:@"title"];
+            _title = [title copy];
+            [self didChangeValueForKey:@"title"];
+        }
+    }
+}
+
+@end
+```
+
+## 2.2 Categories
+
+### 2.2.1 Load Time Behavior
+
+#### Implementation Details
+1. Category Loading Process:
+```objc
+// Category implementation
+@implementation NSString (MyAdditions)
+
++ (void)load {
+    // Called when category is loaded
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Safe setup code
+        [self setupCategoryFunctionality];
+    });
+}
+
++ (void)initialize {
+    // Called before first use
+    if (self == [NSString class]) {
+        // Class-specific initialization
+    }
+}
+
+@end
+```
+
+2. Method List Management:
+```c
+// Internal category structure
+struct category_t {
+    const char *name;
+    classref_t cls;
+    struct method_list_t *instanceMethods;
+    struct method_list_t *classMethods;
+    struct protocol_list_t *protocols;
+    struct property_list_t *instanceProperties;
+};
+```
+
+### 2.2.2 Method Collision Resolution
+
+#### Best Practices
+1. Safe Category Extension:
+```objc
+// Prefix all category methods
+@interface NSArray (SafeAdditions)
+
+- (id)xyz_firstObjectSafely;  // Prefixed method name
+- (NSArray *)xyz_arrayByRemovingNulls;
+
+@end
+
+// Implementation with safety checks
+@implementation NSArray (SafeAdditions)
+
+- (id)xyz_firstObjectSafely {
+    if (self.count == 0) return nil;
+    return self.firstObject;
+}
+
+@end
+```
+
+2. Category Method Conflict Resolution:
+```objc
+// Load order resolution
+@implementation UIView (StyleAdditions)
+
++ (void)load {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Store original implementation
+        Method original = class_getInstanceMethod(self, @selector(layoutSubviews));
+        Method new = class_getInstanceMethod(self, @selector(style_layoutSubviews));
+        
+        // Add new method first
+        if (!class_addMethod(self, 
+                           @selector(layoutSubviews), 
+                           method_getImplementation(new),
+                           method_getTypeEncoding(new))) {
+            // If method exists, exchange implementations
+            method_exchangeImplementations(original, new);
+        }
+    });
+}
+
+@end
+```
+
+#### Real-world Applications
+1. UI Component Extension:
+```objc
+@interface UIView (Styling)
+
+@property (nonatomic, copy) void (^styleConfiguration)(UIView *);
+
+- (void)applyStandardStyling;
+- (void)applyTheme:(ThemeType)theme;
+
+@end
+
+// Implementation with associated objects
+@implementation UIView (Styling)
+
+- (void)setStyleConfiguration:(void (^)(UIView *))config {
+    objc_setAssociatedObject(self, 
+                            @selector(styleConfiguration),
+                            config, 
+                            OBJC_ASSOCIATION_COPY);
+}
+
+@end
+```
+
+2. Debugging Extensions:
+```objc
+@interface NSObject (DebugDescription)
+
+- (NSString *)debugProperties;
+- (NSDictionary *)propertyDictionary;
+
+@end
+
+@implementation NSObject (DebugDescription)
+
+- (NSString *)debugProperties {
+    NSMutableString *debug = [NSMutableString string];
+    
+    unsigned int count;
+    objc_property_t *properties = class_copyPropertyList([self class], &count);
+    
+    for (unsigned int i = 0; i < count; i++) {
+        objc_property_t property = properties[i];
+        NSString *name = @(property_getName(property));
+        id value = [self valueForKey:name];
+        [debug appendFormat:@"%@: %@\n", name, value];
+    }
+    
+    free(properties);
+    return debug;
+}
+
+@end
+```

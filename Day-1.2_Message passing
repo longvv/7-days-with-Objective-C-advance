@@ -1,0 +1,222 @@
+## 1.2 Message Passing Implementation
+
+### 1.2.1 objc_msgSend Flow
+
+#### Implementation Details
+1. Function Structure:
+```asm
+// Assembly implementation on ARM64
+objc_msgSend:
+    PUSH   {r0-r3, lr}    // Save registers
+    CMP    r0, #0         // Check if receiver is nil
+    BEQ    nil_return     // Return nil if receiver is nil
+    LDR    r4, [r0]       // Load isa
+    LSR    r4, r4, #1     // Remove tagged pointer bit
+    LDR    r5, [r4, #8]   // Load cache ptr
+    // ... continue with cache lookup
+```
+
+2. Fast Path Execution:
+```c
+// Pseudo-code of fast path
+uintptr_t objc_msgSend(id self, SEL _cmd, ...) {
+    if (!self) return 0;
+    
+    Class isa = self->getIsa();
+    cache_entry *cache = isa->cache;
+    mask_t mask = cache->mask;
+    uintptr_t index = (uintptr_t)_cmd & mask;
+    
+    // Direct cache hit check
+    if (cache->entries[index].sel == _cmd) {
+        return cache->entries[index].imp(self, _cmd, ...);
+    }
+    // Fall back to slow path
+    return _objc_msgSend_uncached(self, _cmd, ...);
+}
+```
+
+#### Performance Considerations
+1. Critical Path Optimization:
+   - Cache lookup takes 2-3 cycles in fast path
+   - Register allocation optimized for ARM64
+   - Inlined message sends for frequent calls
+
+2. Memory Access Pattern:
+   - L1 cache utilization for method cache
+   - Prefetching of common selectors
+   - Cache line alignment for method lists
+
+#### Common Pitfalls
+1. Messaging nil:
+   - Returns zero/nil/NO by default
+   - Can mask programming errors
+   - Different behavior between architectures
+
+2. Performance Issues:
+   - Dynamic dispatch overhead in tight loops
+   - Cache thrashing with too many unique selectors
+   - Unnecessary message forwarding
+
+### 1.2.2 Method Lookup Process
+
+#### Implementation Details
+1. Lookup Algorithm:
+```objc
+// Simplified lookup process
+IMP class_getMethodImplementation(Class cls, SEL sel) {
+    // Check method cache first
+    if (IMP imp = cache_getImp(cls, sel)) {
+        return imp;
+    }
+    
+    // Search method lists
+    for (Class current = cls; current; current = current->superclass) {
+        method_list_t *mlist = current->data()->methods();
+        if (IMP imp = findMethodInList(mlist, sel)) {
+            // Cache the result
+            cache_fill(cls, sel, imp);
+            return imp;
+        }
+    }
+    
+    // Method not found
+    return _objc_msgForward;
+}
+```
+
+2. Method List Structure:
+```c
+struct method_t {
+    SEL name;       // Method selector
+    const char *types;   // Type encoding
+    IMP imp;       // Method implementation
+};
+
+struct method_list_t {
+    uint32_t entsize;
+    uint32_t count;
+    method_t first;  // Variable length array
+};
+```
+
+#### Performance Optimizations
+1. Method List Search:
+   - Binary search for large method lists
+   - Linear search for small lists (<32 methods)
+   - Sorted method lists for faster lookup
+
+2. Cache Management:
+```objc
+// Cache entry insertion
+static void cache_fill(Class cls, SEL sel, IMP imp) {
+    cache_t *cache = cls->cache;
+    
+    // Check if cache needs to grow
+    if (cache->isFullEnough()) {
+        cache = cache->expand();
+    }
+    
+    // Insert new entry
+    bucket_t *bucket = cache->find(sel);
+    bucket->set(sel, imp);
+}
+```
+
+#### Best Practices
+1. Method Organization:
+```objc
+@implementation MyClass
+
+// Hot methods - frequently called
+- (void)frequentlyCalledMethod {
+    // Implement hot path
+}
+
+// Group related methods together
+- (void)relatedMethod1 {}
+- (void)relatedMethod2 {}
+
+// Rarely used methods last
+- (void)infrequentMethod {}
+
+@end
+```
+
+2. Performance Optimization:
+```objc
+// Cache friendly code
+@implementation MyClass
+
+- (void)processItems:(NSArray *)items {
+    // Cache frequently used methods
+    SEL processSel = @selector(processItem:);
+    IMP processIMP = [self methodForSelector:processSel];
+    
+    for (id item in items) {
+        // Direct IMP call instead of message send
+        processIMP(self, processSel, item);
+    }
+}
+
+@end
+```
+
+#### Real-world Applications
+1. High-Performance UI:
+```objc
+@implementation UITableViewCell
+
+// Optimized drawing method
+- (void)drawRect:(CGRect)rect {
+    // Cache common selectors
+    static SEL drawTextSel = @selector(drawText:);
+    static SEL drawImageSel = @selector(drawImage:);
+    
+    // Use cached implementations
+    IMP drawTextIMP = [self methodForSelector:drawTextSel];
+    IMP drawImageIMP = [self methodForSelector:drawImageSel];
+    
+    // Direct calls for better performance
+    drawTextIMP(self, drawTextSel, _text);
+    drawImageIMP(self, drawImageSel, _image);
+}
+
+@end
+```
+
+2. Message Interception:
+```objc
+// Runtime method swizzling for analytics
+@implementation UIViewController (Analytics)
+
++ (void)load {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class class = [self class];
+        
+        SEL originalSelector = @selector(viewDidAppear:);
+        SEL swizzledSelector = @selector(track_viewDidAppear:);
+        
+        Method originalMethod = class_getInstanceMethod(class, originalSelector);
+        Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
+        
+        // Add method if needed
+        BOOL didAddMethod = class_addMethod(class,
+                                          originalSelector,
+                                          method_getImplementation(swizzledMethod),
+                                          method_getTypeEncoding(swizzledMethod));
+        
+        if (didAddMethod) {
+            class_replaceMethod(class,
+                              swizzledSelector,
+                              method_getImplementation(originalMethod),
+                              method_getTypeEncoding(originalMethod));
+        } else {
+            method_exchangeImplementations(originalMethod, swizzledMethod);
+        }
+    });
+}
+
+@end
+```

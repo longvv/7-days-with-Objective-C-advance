@@ -1,0 +1,233 @@
+## 1.3 Dynamic Method Resolution
+
+### 1.3.1 Method Swizzling Implementation
+
+#### Implementation Details
+1. Core Swizzling Mechanism:
+```objc
+static void SwizzleMethod(Class class, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getInstanceMethod(class, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
+    
+    BOOL didAddMethod = class_addMethod(class,
+                                      originalSelector,
+                                      method_getImplementation(swizzledMethod),
+                                      method_getTypeEncoding(swizzledMethod));
+    
+    if (didAddMethod) {
+        class_replaceMethod(class,
+                          swizzledSelector,
+                          method_getImplementation(originalMethod),
+                          method_getTypeEncoding(originalMethod));
+    } else {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
+    }
+}
+```
+
+2. Safe Swizzling Pattern:
+```objc
+@implementation NSObject (Tracking)
+
++ (void)load {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Safe swizzling in load method
+        Class class = [self class];
+        SwizzleMethod(class, 
+                     @selector(viewDidAppear:),
+                     @selector(tracked_viewDidAppear:));
+    });
+}
+
+- (void)tracked_viewDidAppear:(BOOL)animated {
+    // Call original implementation
+    [self tracked_viewDidAppear:animated];
+    
+    // Add tracking
+    [Analytics logScreenView:NSStringFromClass([self class])];
+}
+
+@end
+```
+
+#### Performance Considerations
+1. Swizzling Impact:
+   - Additional method cache invalidation
+   - Increased method lookup time
+   - Memory overhead for tracking original implementations
+
+2. Optimization Techniques:
+```objc
+// Cache original implementation
+static IMP originalImp = NULL;
+
++ (void)load {
+    originalImp = method_getImplementation(class_getInstanceMethod(self, @selector(originalMethod)));
+}
+
+- (void)swizzledMethod {
+    // Direct IMP call instead of message send
+    originalImp(self, @selector(originalMethod));
+}
+```
+
+### 1.3.2 Message Forwarding
+
+#### Implementation Details
+1. Forwarding Stages:
+```objc
+@implementation ForwardingExample
+
+// Stage 1: Dynamic method resolution
++ (BOOL)resolveInstanceMethod:(SEL)sel {
+    if (sel == @selector(dynamicMethod:)) {
+        class_addMethod(self,
+                       sel,
+                       (IMP)dynamicMethodIMP,
+                       "v@:@");
+        return YES;
+    }
+    return [super resolveInstanceMethod:sel];
+}
+
+// Stage 2: Fast forwarding
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    if (aSelector == @selector(someMethod:)) {
+        return _internalObject; // Forward to another object
+    }
+    return [super forwardingTargetForSelector:aSelector];
+}
+
+// Stage 3: Normal forwarding
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+    if (aSelector == @selector(complexMethod:)) {
+        return [NSMethodSignature signatureWithObjCTypes:"v@:@"];
+    }
+    return [super methodSignatureForSelector:aSelector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)anInvocation {
+    if ([_delegate respondsToSelector:anInvocation.selector]) {
+        [anInvocation invokeWithTarget:_delegate];
+    } else {
+        [super forwardInvocation:anInvocation];
+    }
+}
+
+@end
+```
+
+2. Proxy Implementation:
+```objc
+@interface ProxyObject : NSProxy
+
+@property (nonatomic, strong) id realObject;
+
+- (instancetype)initWithObject:(id)object;
+
+@end
+
+@implementation ProxyObject
+
+- (instancetype)initWithObject:(id)object {
+    _realObject = object;
+    return self;
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    return [_realObject methodSignatureForSelector:sel];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    if ([_realObject respondsToSelector:invocation.selector]) {
+        [invocation invokeWithTarget:_realObject];
+    }
+}
+
+@end
+```
+
+#### Performance Impact
+1. Forwarding Costs:
+   - Dynamic resolution: ~2x normal method call
+   - Fast forwarding: ~3x normal method call
+   - Normal forwarding: ~10x normal method call
+
+2. Memory Usage:
+   - NSInvocation creation cost
+   - Method signature caching
+   - Proxy object overhead
+
+#### Best Practices
+1. Forwarding Chain:
+```objc
+@implementation AdvancedProxy
+
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    // Try fast path first
+    if ([_primaryTarget respondsToSelector:aSelector]) {
+        return _primaryTarget;
+    }
+    return nil;
+}
+
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector {
+    // Check all potential targets
+    for (id target in _forwardingChain) {
+        if ([target respondsToSelector:aSelector]) {
+            return [target methodSignatureForSelector:aSelector];
+        }
+    }
+    return [super methodSignatureForSelector:aSelector];
+}
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    // Find first responder in chain
+    for (id target in _forwardingChain) {
+        if ([target respondsToSelector:invocation.selector]) {
+            [invocation invokeWithTarget:target];
+            return;
+        }
+    }
+    [super forwardInvocation:invocation];
+}
+
+@end
+```
+
+#### Real-world Applications
+1. Analytics Integration:
+```objc
+@implementation AnalyticsProxy
+
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    // Log method call
+    [Analytics logEvent:NSStringFromSelector(invocation.selector)
+              withInfo:@{@"class": NSStringFromClass([self class])}];
+    
+    // Forward to real object
+    [invocation invokeWithTarget:_realObject];
+}
+
+@end
+```
+
+2. Lazy Loading Pattern:
+```objc
+@implementation LazyLoadingProxy
+
+- (id)forwardingTargetForSelector:(SEL)aSelector {
+    if (!_realObject) {
+        _realObject = [self createExpensiveObject];
+    }
+    return _realObject;
+}
+
+- (id)createExpensiveObject {
+    // Create real object only when needed
+    return [[ExpensiveObject alloc] initWithConfiguration:_config];
+}
+
+@end
+```

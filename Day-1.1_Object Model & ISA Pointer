@@ -1,0 +1,128 @@
+## Runtime Architecture Implementation Details
+
+### 1. Object Model & ISA Pointer
+
+#### Implementation Details:
+- Class Structure in Memory:
+  ```objc
+  struct objc_class {
+      Class isa;                     // Metaclass pointer
+      Class superclass;              // Superclass pointer
+      cache_t cache;                 // Method cache
+      uintptr_t bits;               // Class flags & reference count
+      class_data_bits_t data;       // Class data pointer & flags
+  }
+  ```
+
+- ISA Pointer Implementation:
+  - Uses non-pointer ISA compression on 64-bit systems
+  - Format: `isa = shiftedAddress | indexedIsa | magic_value`
+  - First few bits store metadata (retain count, weakly referenced flag)
+  - Remaining bits store actual class pointer after shifting
+
+- Instance Variable Layout:
+  ```objc
+  struct ivar_t {
+      int32_t *offset;              // Offset from object pointer to ivar
+      const char *name;             // Name of instance variable
+      const char *type;             // Type encoding
+      uint32_t alignment;           // Alignment in bytes
+      uint32_t size;                // Size in bytes
+  }
+  ```
+
+#### Performance Considerations:
+1. ISA Pointer Optimizations:
+   - Tagged Pointers reduce memory allocation for small values
+   - Non-pointer ISA reduces memory usage by ~50% on 64-bit systems
+   - Fast path for common operations using bit manipulation
+
+2. Memory Layout Impact:
+   - Instance variables are aligned for optimal CPU access
+   - Hot variables should be placed first for better cache utilization
+   - Related variables are grouped together to improve locality
+
+#### Common Pitfalls:
+1. ISA Swizzling Issues:
+   - Direct ISA manipulation can break tagged pointer optimizations
+   - Incorrect handling of compressed ISA bits leads to crashes
+   - Not preserving ISA bits during class replacement
+
+2. Class Structure Dependencies:
+   - Assuming fixed offset for instance variables across different architectures
+   - Not handling superclass instance variable layout changes
+   - Incorrect alignment assumptions leading to crashes
+
+#### Best Practices:
+1. Class Structure:
+   ```objc
+   // Proper class structure declaration
+   @interface MyClass : NSObject {
+       @private
+       int32_t _alignedVar;  // 4-byte aligned
+       char _padding[4];     // Explicit padding
+       double _doubleVar;    // 8-byte aligned
+   }
+   @end
+   ```
+
+2. Instance Variable Access:
+   ```objc
+   // Use accessor methods instead of direct ivar access
+   @implementation MyClass
+   - (void)setValue:(int)value {
+       _alignedVar = value;  // Direct access only within implementation
+   }
+   @end
+   ```
+
+#### Real-world Applications:
+
+1. High-Performance Collection Classes:
+   ```objc
+   @interface FastArray : NSObject {
+       @private
+       void *_buffer;           // Direct buffer access
+       NSUInteger _count;       // Packed into ISA bits
+       NSUInteger _capacity;    // Optimized for growth
+   }
+   ```
+
+2. Memory-Efficient Objects:
+   ```objc
+   // Using tagged pointers for small strings
+   NSString *str = @"123";  // Stored directly in pointer
+   // Using compressed ISA for regular objects
+   MyClass *obj = [[MyClass alloc] init];  // Optimized ISA storage
+   ```
+
+### Method Cache Implementation
+
+#### Implementation Details:
+- Cache Structure:
+  ```c
+  typedef struct {
+      SEL sel;          // Selector
+      IMP imp;          // Implementation pointer
+      cache_key_t key;  // Precomputed hash
+  } bucket_t;
+
+  typedef struct {
+      bucket_t *buckets;     // Hash table
+      mask_t mask;          // Capacity - 1
+      mask_t occupied;      // Number of entries
+  } cache_t;
+  ```
+
+#### Performance Impact:
+1. Cache Hit Rate:
+   - Typical hit rates > 95%
+   - First-level cache access in ~2-3 cycles
+   - Miss penalty: ~100-200 cycles for full lookup
+
+2. Memory Usage:
+   - Each cache entry: 16-24 bytes
+   - Initial cache size: 4 entries
+   - Growth pattern: power of 2 up to 16,384 entries
+
+Best practices and further implementation details continue... 
